@@ -51,12 +51,16 @@ except ImportError:
     except ImportError:
         _np = None
 
-# Turbo (viper) kernel, prebuilt per chip as flac_kernel.<arch>.mpy from src/flac_turbo.py.
-# Without it (CPython, or a chip with no build) the plain Python loops run.
+# The hot loops, prebuilt per chip: flac_native.<arch>.mpy (C, src/native), else
+# flac_kernel.<arch>.mpy (turbo, src/flac_turbo.py). Same functions.
+# Without either (CPython, or a chip with no build) the plain Python loops run.
 try:
-    from adafruit_flac import flac_kernel as _kernel
+    from adafruit_flac import flac_native as _kernel
 except (ImportError, ValueError):
-    _kernel = None
+    try:
+        from adafruit_flac import flac_kernel as _kernel
+    except (ImportError, ValueError):
+        _kernel = None
 
 # Largest sum the 32-bit turbo predictor can hold.
 _INT32 = (1 << 31) - 1
