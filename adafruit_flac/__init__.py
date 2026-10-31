@@ -456,6 +456,106 @@ class FLACDecoder:
         self._pcm_len = 0
         self._pcm_pos = 0
 
+    def seek(self, seconds):
+        """Jump to the frame that holds about ``seconds`` (within half a
+        second, usually less). Returns the time of that frame in seconds
+        (`duration` if it is past the end)."""
+        total = self._total
+        rate = self._rate
+        if seconds <= 0 or not total:
+            self.rewind()
+            return 0
+        f = self._file
+        f.seek(0, 2)
+        size = f.tell()
+        start = self._audio_start
+        target = int(seconds * rate)
+        self._len = self._off = self._pcm_len = self._pcm_pos = 0
+        if target >= total:
+            f.seek(size)
+            self._eof = True
+            self._decoded = total
+            return total / rate
+        # Guess the byte offset from the average bit rate, then correct it a
+        # few times: the bit rate changes through a track.
+        per = (size - start) / total  # bytes per sample
+        pos = start + int(target * per)
+        best = (start, 0)
+        for _ in range(6):
+            found = self._sync(max(start, pos), size)
+            if found is None:
+                pos -= self._chunk
+                continue
+            at, first = found
+            if first <= target and first > best[1]:
+                best = found
+            if 0 <= target - first < rate // 2:
+                break
+            pos = at + int((target - first) * per) - (rate // 4 if first > target else 0) * int(per)
+        f.seek(best[0])
+        self._eof = False
+        self._decoded = best[1]
+        return best[1] / rate
+
+    def _sync(self, pos, size):
+        """(byte offset, first sample) of the first frame at or after pos."""
+        f = self._file
+        buf = self._buf
+        while pos < size:
+            f.seek(pos)
+            got = f.readinto(memoryview(buf)[: self._chunk]) or 0
+            # Section 9.1: a frame header is a sync code that passes CRC-8.
+            # Audio data can hold the sync pattern too, so check each one.
+            i = buf.find(b"\xff", 0, max(0, got - 16))
+            while i >= 0:
+                if (buf[i + 1] & 0xFE) == 0xF8:
+                    first = self._frame_start(buf, i)
+                    if first >= 0:
+                        return pos + i, first
+                i = buf.find(b"\xff", i + 1, got - 16)
+            if got < self._chunk:
+                return None
+            pos += got - 16
+        return None
+
+    def _frame_start(self, buf, i):
+        """The first sample of the frame whose header starts at buf[i], or -1
+        if it is not a valid header."""
+        bs_code = buf[i + 2] >> 4
+        rate_code = buf[i + 2] & 15
+        chan_code = buf[i + 3] >> 4
+        if not bs_code or rate_code == 15 or chan_code > 10 or buf[i + 3] & 1:
+            return -1
+        # coded frame/sample number, UTF-8 style (section 9.1.5)
+        p = i + 4
+        n = buf[p]
+        extra = 0
+        while n & (0x80 >> extra) and extra < 7:
+            extra += 1
+        if extra == 1:
+            return -1
+        if extra:
+            n &= 0x7F >> extra
+            for k in range(1, extra):
+                c = buf[p + k]
+                if c & 0xC0 != 0x80:
+                    return -1
+                n = (n << 6) | (c & 0x3F)
+            p += extra
+        else:
+            p += 1
+        p += (bs_code == 6) + 2 * (bs_code == 7) + (rate_code == 12) + 2 * (rate_code in (13, 14))
+        crc = 0
+        for k in range(i, p):
+            crc ^= buf[k]
+            for _ in range(8):
+                crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else crc << 1
+        if crc != buf[p]:
+            return -1
+        if buf[i + 1] & 1:  # variable block size: n is the sample number
+            return n
+        return n * (self._maxblock or 4096)  # fixed: n is the frame number
+
     def readinto(self, buf):
         """Fill ``buf`` (an ``array('h')`` or memoryview of one) with
         interleaved samples. Returns the number of values written; less than
