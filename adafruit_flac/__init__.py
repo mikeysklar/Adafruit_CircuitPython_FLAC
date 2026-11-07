@@ -481,6 +481,7 @@ class FLACDecoder:
         per = (size - start) / total  # bytes per sample
         pos = start + int(target * per)
         best = (start, 0)
+        back = self._maxblock or 4096  # samples to step back past an overshoot, doubled each time
         for _ in range(6):
             found = self._sync(max(start, pos), size)
             if found is None:
@@ -491,7 +492,11 @@ class FLACDecoder:
                 best = found
             if 0 <= target - first < rate // 2:
                 break
-            pos = at + int((target - first) * per) - (rate // 4 if first > target else 0) * int(per)
+            if first > target:
+                pos = at - int((first - target + back) * per) - 1
+                back *= 2
+            else:
+                pos = at + int((target - first) * per)
         f.seek(best[0])
         self._eof = False
         self._decoded = best[1]
