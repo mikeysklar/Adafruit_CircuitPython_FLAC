@@ -112,6 +112,50 @@ def check(name, accel):
     return "ok  bps=%d ch=%d modes=%s" % (bps, ch, list(dec.lpc_modes))
 
 
+SEEK_TARGETS = (0, 1.5, 5.0, 9.2, 12.0)  # start, early, middle, last second, past the end
+
+
+def check_seek(name):
+    """seek() lands on a frame at or before the target, within half a second,
+    and readinto then continues from exactly that sample."""
+    ch, cont, ref = read_wav(os.path.join(MEDIA, name + ".ref.wav"))
+    dec = adafruit_flac.FLACDecoder(os.path.join(MEDIA, name + ".flac"))
+    bps = dec.source_bits_per_sample
+    ref = [[v >> (cont - bps) for v in r] for r in ref]
+    out_ch = min(ch, 2)
+    sh = bps - 16
+    buf = array("h", bytes(2 * 4096 * out_ch))
+    for t in SEEK_TARGETS:
+        got_t = dec.seek(t)
+        if t >= dec.duration:
+            if got_t != dec.duration or dec.readinto(buf):
+                return "seek(%g) past the end: got %g and more audio" % (t, got_t)
+            continue
+        if not t - 0.5 < got_t <= t:
+            return "seek(%g) landed at %g" % (t, got_t)
+        first = round(got_t * dec.sample_rate)
+        n = dec.readinto(buf)
+        want = array("h")
+        for i in range(first, first + n // out_ch):
+            for c in range(out_ch):
+                v = ref[c][i]
+                want.append(v >> sh if sh >= 0 else v << -sh)
+        if buf[:n] != want:
+            return "seek(%g) to %g: audio does not match the reference there" % (t, got_t)
+    return "ok"
+
+
+def test_seek():
+    """pytest entry: seek() on every clip in media/."""
+    import pytest  # noqa: PLC0415
+
+    names = _names()
+    if not names:
+        pytest.skip("no test media; run tools/make_test_media.py")
+    bad = [(n, r) for n in names if (r := check_seek(n)) != "ok"]
+    assert not bad, bad
+
+
 def _names():
     if not os.path.isdir(MEDIA):
         return []
